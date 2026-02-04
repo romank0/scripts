@@ -1,5 +1,9 @@
 #!/bin/zsh
-
+# Interactively move a bookmark to a revision and push it.
+# Usage: jj-tug
+# Alias: Add to ~/.jjconfig.toml:
+#   [aliases]
+#   tug = ["util", "exec", "--", "jj-tug"]
 
 set -e
 
