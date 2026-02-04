@@ -1,0 +1,210 @@
+#!/bin/zsh
+
+
+set -e
+
+# Terminal control (all output to /dev/tty for use inside command substitution)
+clear_to_end() { printf '\e[J' >/dev/tty; }
+hide_cursor() { printf '\e[?25l' >/dev/tty; }
+show_cursor() { printf '\e[?25h' >/dev/tty; }
+move_up() { printf '\e[%dA' "$1" >/dev/tty; }
+
+cleanup() {
+    show_cursor
+    stty echo 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Read a single keypress (handles arrow keys)
+# Sets REPLY_KEY global variable instead of using stdout
+read_key() {
+    local key2
+    read -rsk1 REPLY_KEY </dev/tty
+    if [[ "$REPLY_KEY" == $'\x1b' ]]; then
+        read -rsk2 -t 0.1 key2 </dev/tty 2>/dev/null || true
+        REPLY_KEY+="$key2"
+    fi
+}
+
+# Interactive list selection
+# Args: prompt, array of items
+# Returns: selected item via stdout, index via exit code
+select_from_list() {
+    local prompt="$1"
+    shift
+    local -a items=("$@")
+    local count=${#items[@]}
+    local selected=1  # zsh is 1-indexed
+
+    if [[ $count -eq 0 ]]; then
+        echo "No items to select" >&2
+        return 1
+    fi
+
+    hide_cursor
+
+    while true; do
+        # Print prompt and list
+        echo "$prompt" >/dev/tty
+        for ((i = 1; i <= count; i++)); do
+            if [[ $i -eq $selected ]]; then
+                echo " > $i. ${items[$i]}" >/dev/tty
+            else
+                echo "   $i. ${items[$i]}" >/dev/tty
+            fi
+        done
+
+        read_key
+
+        # Move cursor back to redraw
+        local lines_to_move=$((count + 1))
+        move_up "$lines_to_move"
+        clear_to_end
+
+        case "$REPLY_KEY" in
+            $'\x1b[A'|k) # Up arrow or k
+                ((selected > 1)) && ((selected--))
+                ;;
+            $'\x1b[B'|j) # Down arrow or j
+                ((selected < count)) && ((selected++))
+                ;;
+            [1-9])
+                if [[ $REPLY_KEY -le $count ]]; then
+                    selected=$REPLY_KEY
+                    break
+                fi
+                ;;
+            ''|$'\n') # Enter
+                break
+                ;;
+            q)
+                show_cursor
+                echo "Cancelled" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    show_cursor
+    echo " > $selected. ${items[$selected]}" >/dev/tty
+
+    echo "${items[$selected]}"
+}
+
+# Yes/No prompt
+# Returns: 0 for yes, 1 for no
+yes_no_prompt() {
+    local prompt="$1"
+    local selected=1  # 1 = Yes, 2 = No
+    local -a options=("Yes" "No")
+
+    hide_cursor
+
+    while true; do
+        echo "$prompt"
+        for i in {1..2}; do
+            if [[ $i -eq $selected ]]; then
+                echo " > $i. ${options[$i]}"
+            else
+                echo "   $i. ${options[$i]}"
+            fi
+        done
+
+        read_key
+
+        move_up 3
+        clear_to_end
+
+        case "$REPLY_KEY" in
+            $'\x1b[A'|$'\x1b[B'|k|j) # Arrow keys
+                selected=$((selected == 1 ? 2 : 1))
+                ;;
+            1)
+                selected=1
+                break
+                ;;
+            2)
+                selected=2
+                break
+                ;;
+            ''|$'\n') # Enter
+                break
+                ;;
+            q)
+                show_cursor
+                echo "Cancelled" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    show_cursor
+    echo " > $selected. ${options[$selected]}"
+
+    # Return 0 for Yes (selected=1), 1 for No (selected=2)
+    return $((selected - 1))
+}
+
+# Step 1: Get bookmarks between heads and fork point
+echo "Finding bookmarks..."
+bookmarks_raw=$(jj log -r 'fork_point(heads(@::) | trunk())::heads(@::)' --no-graph -T 'bookmarks ++ "\n"' | tr ' ' '\n' | grep -v '^$' | grep -v '@' | grep -Ev '^(master|stable)\*?$' | sed 's/\*$//' | awk '!seen[$0]++')
+bookmarks=("${(f)bookmarks_raw}")
+
+if [[ ${#bookmarks[@]} -eq 0 ]]; then
+    echo "No bookmarks found in the range fork_point(heads(@::) | trunk())::heads(@::)" >&2
+    exit 1
+fi
+
+if [[ ${#bookmarks[@]} -eq 1 ]]; then
+    bookmark="${bookmarks[1]}"
+    echo ""
+    echo "Using bookmark: $bookmark"
+else
+    echo ""
+    bookmark=$(select_from_list "Select bookmark to move: (numbers select, Enter confirms)" "${bookmarks[@]}")
+fi
+echo ""
+
+# Step 2: Determine default target and show log
+is_empty=$(jj log -r @ --no-graph -T 'if(empty, "true", "false")')
+has_description=$(jj log -r @ --no-graph -T 'if(description, "true", "false")')
+
+if [[ "$is_empty" == "true" && "$has_description" == "false" ]]; then
+    default_target="@-"
+else
+    default_target="@"
+fi
+
+echo "Current context:"
+jj log --limit 5
+echo ""
+
+printf "Move bookmark to [%s]: " "$default_target"
+read -r target
+target="${target:-$default_target}"
+
+echo ""
+echo "Moving bookmark '$bookmark' to '$target'..."
+jj bookmark move "$bookmark" --to "$target"
+echo "Done."
+
+# Step 3: Check if tracked and offer to push
+tracking_info=$(jj bookmark list "$bookmark" 2>/dev/null | grep '@' || true)
+
+if [[ -n "$tracking_info" ]]; then
+    # Extract remote name from tracking info (format: "bookmark@origin" or "bookmark@origin (behind by N)")
+    remote_name=$(echo "$tracking_info" | sed -n 's/.*@\([a-zA-Z0-9_-]*\).*/\1/p' | head -1)
+    remote_name="${remote_name:-origin}"
+    remote_url=$(jj git remote list 2>/dev/null | awk -v r="$remote_name" '$1 == r {print $2}')
+
+    echo ""
+    if yes_no_prompt "Push '$bookmark' to $remote_name ($remote_url)?"; then
+        echo ""
+        echo "Pushing..."
+        jj git push -b "$bookmark"
+        echo "Pushed."
+    else
+        echo ""
+        echo "Skipped push."
+    fi
+fi
