@@ -151,9 +151,18 @@ yes_no_prompt() {
 
 # Step 1: Get bookmarks between heads and fork point
 echo "Finding bookmarks..."
-bookmarks_raw=$({ jj log -r 'trunk()..@' --no-graph -T 'bookmarks ++ "\n"'
+all_bookmarks_raw=$({ jj log -r 'trunk()..@' --no-graph -T 'bookmarks ++ "\n"'
     jj log -r 'reachable(@, trunk()..) ~ (trunk()..@)' --no-graph -T 'bookmarks ++ "\n"'
-  } | tr ' ' '\n' | grep -v '^$' | grep -v '@' | grep -Ev '^(master|stable)\*?$' | sed 's/\*$//' | awk '!seen[$0]++')
+  } | tr ' ' '\n' | grep -v '^$' | grep -v '@' | sed 's/\*$//' | awk '!seen[$0]++')
+bookmarks_raw=$(echo "$all_bookmarks_raw" | grep -Ev '^(main|master|stable)$' || true)
+if [[ -z "$bookmarks_raw" ]]; then
+    bookmarks_raw=$(echo "$all_bookmarks_raw" | grep -E '^(main|master)$' | head -1)
+fi
+# When no bookmarks found in the range, check if main/master exists in the repo
+if [[ -z "$bookmarks_raw" ]]; then
+    trunk_bookmark=$(jj log -r 'trunk()' --no-graph -T 'bookmarks' | tr ' ' '\n' | grep -v '^$' | grep -v '@' | sed 's/\*$//' | grep -E '^(main|master)$' | head -1)
+    bookmarks_raw="$trunk_bookmark"
+fi
 bookmarks=("${(f)bookmarks_raw}")
 
 if [[ ${#bookmarks[@]} -eq 0 ]]; then
