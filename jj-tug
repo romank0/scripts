@@ -151,11 +151,13 @@ yes_no_prompt() {
 
 # Step 1: Get bookmarks between heads and fork point
 echo "Finding bookmarks..."
-bookmarks_raw=$(jj log -r 'fork_point(heads(@::) | trunk())::heads(@::)' --no-graph -T 'bookmarks ++ "\n"' | tr ' ' '\n' | grep -v '^$' | grep -v '@' | grep -Ev '^(master|stable)\*?$' | sed 's/\*$//' | awk '!seen[$0]++')
+bookmarks_raw=$({ jj log -r 'trunk()..@' --no-graph -T 'bookmarks ++ "\n"'
+    jj log -r 'reachable(@, trunk()..) ~ (trunk()..@)' --no-graph -T 'bookmarks ++ "\n"'
+  } | tr ' ' '\n' | grep -v '^$' | grep -v '@' | grep -Ev '^(master|stable)\*?$' | sed 's/\*$//' | awk '!seen[$0]++')
 bookmarks=("${(f)bookmarks_raw}")
 
 if [[ ${#bookmarks[@]} -eq 0 ]]; then
-    echo "No bookmarks found in the range fork_point(heads(@::) | trunk())::heads(@::)" >&2
+    echo "No bookmarks found in reachable(@, trunk()..)" >&2
     exit 1
 fi
 
